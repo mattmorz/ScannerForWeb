@@ -1,4 +1,4 @@
-﻿using Fleck;
+using Fleck;
 using NTwain;
 using NTwain.Data;
 using System;
@@ -6,6 +6,7 @@ using System.CodeDom.Compiler;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
@@ -20,7 +21,7 @@ namespace NewScan
 {
     public partial class Form1 : Form
     {
-        ImageCodecInfo _tiffCodecInfo;
+        //ImageCodecInfo _tiffCodecInfo;
         TwainSession _twain;
         bool _stopScan;
         bool _loadingCaps;
@@ -28,6 +29,7 @@ namespace NewScan
         WebSocketServer server;
         string tempDirectory;
         string tempFile;
+
         // handle image data
         Image img = null;
         byte[] outPut = null;
@@ -50,30 +52,34 @@ namespace NewScan
             {
                 Text = Text + " (32bit)";
             }
+            /*
             foreach (var enc in ImageCodecInfo.GetImageEncoders())
             {
                 if (enc.MimeType == "image/tiff") { _tiffCodecInfo = enc; break; }
             }
+            */
 
             this.WindowState = FormWindowState.Minimized;
             this.ShowInTaskbar = false;
 
+            //socket connection to be accessed in web app
             allSockets = new List<IWebSocketConnection>();
             server = new WebSocketServer("ws://0.0.0.0:8181");
             server.Start(socket =>
             {
                 socket.OnOpen = () =>
                 {
-                    Console.WriteLine("Open!");
+                    Console.WriteLine("Socket Open!");
                     allSockets.Add(socket);
                 };
                 socket.OnClose = () =>
                 {
-                    Console.WriteLine("Close!");
+                    Console.WriteLine("Socket Close!");
                     allSockets.Remove(socket);
                 };
                 socket.OnMessage = message =>
                 {
+                    //call websocket
                     if (message == "1100")
                     {
                         this.Invoke(new Action(() =>
@@ -81,21 +87,24 @@ namespace NewScan
                             this.WindowState = FormWindowState.Normal;
                         }));
                     }
+
                     //saving to db
                     if (message == "1101")
                     {
                         this.BeginInvoke(new Action(() =>
                         {
+                            _stopScan = true;
                             btnStopScan.Enabled = false;
                             btnStartCapture.Enabled = false;
                             Console.WriteLine("Saving on Database.");
                         }));
                     }
-                    //saving to db
+                    //done saving to db
                     if (message == "1102")
                     {
                         this.BeginInvoke(new Action(() =>
                         {
+                            _stopScan = false;
                             btnStopScan.Enabled = false;
                             btnStartCapture.Enabled = true;
                             Console.WriteLine("Scanning enabled again.");
@@ -192,8 +201,6 @@ namespace NewScan
 
             _twain.DataTransferred += (s, e) =>
             {
-
-                
                 PlatformInfo.Current.Log.Info("Transferred data event on thread " + Thread.CurrentThread.ManagedThreadId);
 
                 /*
@@ -205,8 +212,7 @@ namespace NewScan
                     break;
                 }
                 */
-
-
+                Console.WriteLine(e.FileDataPath);
                 if (e.NativeData != IntPtr.Zero)
                 {
                     stream = e.GetNativeImageStream();
@@ -225,6 +231,7 @@ namespace NewScan
                 else if (!string.IsNullOrEmpty(e.FileDataPath))
                 {
                     img = new Bitmap(e.FileDataPath);
+                    Console.WriteLine("FileDataPath");
                 }
 
                 if (img != null)
@@ -232,10 +239,11 @@ namespace NewScan
                     tempDirectory = Path.Combine(Path.GetTempPath(), "tempDir");
                     Directory.CreateDirectory(tempDirectory);
                     tfc = new TempFileCollection(tempDirectory, false);
-                    tempFile = tfc.AddExtension("png", false);
+                    tempFile = tfc.AddExtension("png");
                     Console.WriteLine(tempFile);
-                    img.Save(tempFile, ImageFormat.Png); ;
+                    img.Save(tempFile, ImageFormat.Png);
                     Console.WriteLine("Image Save");
+                    Console.WriteLine(tfc.Count);
 
                     bw = new BackgroundWorker();
                     bw.WorkerReportsProgress = true;
@@ -293,10 +301,10 @@ namespace NewScan
         }
 
         private void Bw_RunWorkerCompleted(object sender, RunWorkerCompletedEventArgs e)
-        {        
+        {
+               
                 tfc.Delete();
-                PlatformInfo.Current.Log.Info("Tempfile deleted");
-                Console.WriteLine(tfc.Count);
+           
                 labelPrompt.Text = String.Empty;
 
                 //var serializer = new JavaScriptSerializer();
@@ -308,8 +316,9 @@ namespace NewScan
                     socket.Send(Result);
                     PlatformInfo.Current.Log.Info("extracted text sent");
                     _stopScan = false;
-                }
                     
+                }
+
                 Console.WriteLine("All completed!");
                 
         }
@@ -330,8 +339,9 @@ namespace NewScan
                 //Obtain the texts from OCR result
                 texts = result.ConvertAll<String>(delegate (Word w) { return w.Text; }).ToArray();
                 Result = String.Join(" ", texts);
-
-
+                image.Dispose();
+                ocr.Dispose();
+               
             }
             catch (Exception exception)
             {
@@ -429,17 +439,31 @@ namespace NewScan
         {
             if (_twain.State == 4)
             {
-                //_twain.CurrentSource.CapXferCount.Set(4);
-                _twain.CurrentSource.Capabilities.CapXferCount.SetValue(5);
-                //_stopScan = false;
-                //twain.CurrentSource.Enable()
+                _twain.CurrentSource.Capabilities.ICapAutomaticBorderDetection.SetValue(BoolType.True);
+                _twain.CurrentSource.Capabilities.ICapAutomaticRotate.SetValue(BoolType.True);
+                _twain.CurrentSource.Capabilities.ICapImageFileFormat.SetValue(FileFormat.Png);
+                var currentDPI =_twain.CurrentSource.Capabilities.ICapXResolution.GetCurrent();
+                if (currentDPI < 300)
+                {
+                    _twain.CurrentSource.Capabilities.ICapXResolution.SetValue(300);
+                    _twain.CurrentSource.Capabilities.ICapYResolution.SetValue(300);
+                }
+                
+              
+                if (_twain.CurrentSource.Capabilities.ICapCompression.IsSupported && _twain.CurrentSource.Capabilities.ICapCompression.CanSet)
+                    _twain.CurrentSource.Capabilities.ICapCompression.SetValue(CompressionType.Png);
+                    Console.WriteLine("Can compress....");
+
+                SetXferLimit(5);
                 if (_twain.CurrentSource.Capabilities.CapUIControllable.IsSupported)//.SupportedCaps.Contains(CapabilityId.CapUIControllable))
                 {
+                    
                     // hide scanner ui if possible
                     if (_twain.CurrentSource.Enable(SourceEnableMode.NoUI, false, this.Handle) == ReturnCode.Success)
                     {
                         btnStopScan.Enabled = true;
                         btnStartCapture.Enabled = false;
+                        Console.WriteLine("Scanning... false");
                         //this.WindowState = FormWindowState.Minimized;
                     }
                 }
@@ -449,6 +473,7 @@ namespace NewScan
                     {
                         btnStopScan.Enabled = true;
                         btnStartCapture.Enabled = false;
+                        Console.WriteLine("Scanning... true");
                         //this.WindowState = FormWindowState.Minimized;
                     }
                 }
@@ -465,6 +490,19 @@ namespace NewScan
 
         #region cap control
 
+        // you can define a small method to set transfer limit, if your TwainSession is called _session.
+        void SetXferLimit(int limit = -1)
+        {
+            if (_twain.CurrentSource.Capabilities.CapXferCount.CanSet)
+            {
+                var rc = _twain.CurrentSource.Capabilities.CapXferCount.SetValue(limit);
+                if (rc != ReturnCode.Success)
+                {
+                    var stat = _twain.CurrentSource.GetStatus();
+                    Trace.TraceError("Set xfer count failed: " + rc + " - " + stat.ConditionCode);
+                }
+            }
+        }
 
         private void LoadSourceCaps()
         {
@@ -578,9 +616,9 @@ namespace NewScan
         }
 
         #endregion
+
         public static byte[] StreamToByte(Stream input)
         {
-
             using (MemoryStream ms = new MemoryStream())
             {
                 input.CopyTo(ms);
@@ -588,14 +626,6 @@ namespace NewScan
             }
 
         }
-
-
-
-        private void groupDepth_Enter(object sender, EventArgs e)
-        {
-
-        }
-
 
 
         private void Form1_FormClosing(object sender, FormClosingEventArgs e)
